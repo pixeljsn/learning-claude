@@ -1,0 +1,15 @@
+NAMESPACE=your-namespace
+
+echo -e "POD\tCPU_REQ\tMEM_REQ\tCPU_USAGE\tMEM_USAGE"
+
+for pod in $(kubectl get pods -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
+  cpu_req=$(kubectl get pod $pod -n $NAMESPACE -o jsonpath='{.spec.containers[*].resources.requests.cpu}')
+  mem_req=$(kubectl get pod $pod -n $NAMESPACE -o jsonpath='{.spec.containers[*].resources.requests.memory}')
+
+  usage=$(kubectl top pod $pod -n $NAMESPACE --no-headers 2>/dev/null)
+
+  cpu_usage=$(echo $usage | awk '{print $2}')
+  mem_usage=$(echo $usage | awk '{print $3}')
+
+  echo -e "$pod\t$cpu_req\t$mem_req\t$cpu_usage\t$mem_usage"
+done
