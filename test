@@ -13,3 +13,75 @@ for pod in $(kubectl get pods -n $NAMESPACE -o jsonpath='{.items[*].metadata.nam
 
   echo -e "$pod\t$cpu_req\t$mem_req\t$cpu_usage\t$mem_usage"
 done
+
+
+NAMESPACE=your-namespace
+
+echo -e "POD\tCPU_REQ\tCPU_USE\tCPU%\tCPU_SAVINGS\tMEM_REQ\tMEM_USE\tMEM%\tMEM_SAVINGS"
+
+for pod in $(kubectl get pods -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
+
+  # --- Sum CPU + MEM requests across containers ---
+  cpu_req_m=0
+  mem_req_mi=0
+
+  container_count=$(kubectl get pod $pod -n $NAMESPACE -o jsonpath='{.spec.containers[*].name}' | wc -w)
+
+  for i in $(seq 0 $((container_count-1))); do
+    cpu=$(kubectl get pod $pod -n $NAMESPACE -o jsonpath="{.spec.containers[$i].resources.requests.cpu}")
+    mem=$(kubectl get pod $pod -n $NAMESPACE -o jsonpath="{.spec.containers[$i].resources.requests.memory}")
+
+    # --- CPU normalize to millicores ---
+    if [[ "$cpu" == *m ]]; then
+      val=${cpu%m}
+    elif [[ -n "$cpu" ]]; then
+      val=$(echo "$cpu * 1000" | bc)
+    else
+      val=0
+    fi
+    cpu_req_m=$(echo "$cpu_req_m + $val" | bc)
+
+    # --- Memory normalize to Mi ---
+    if [[ "$mem" == *Mi ]]; then
+      val=${mem%Mi}
+    elif [[ "$mem" == *Gi ]]; then
+      val=$(echo "${mem%Gi} * 1024" | bc)
+    elif [[ "$mem" == *Ki ]]; then
+      val=$(echo "${mem%Ki} / 1024" | bc)
+    else
+      val=0
+    fi
+    mem_req_mi=$(echo "$mem_req_mi + $val" | bc)
+  done
+
+  # --- Usage (already summed at pod level) ---
+  usage=$(kubectl top pod $pod -n $NAMESPACE --no-headers 2>/dev/null)
+
+  cpu_usage=$(echo $usage | awk '{print $2}')
+  mem_usage=$(echo $usage | awk '{print $3}')
+
+  # Normalize usage
+  cpu_usage_m=${cpu_usage%m}
+  mem_usage_mi=$(echo $mem_usage | sed 's/Mi//' | sed 's/Gi/*1024/' | bc 2>/dev/null)
+
+  # --- CPU % ---
+  if [[ "$cpu_req_m" -ne 0 ]]; then
+    cpu_pct=$(echo "scale=2; ($cpu_usage_m/$cpu_req_m)*100" | bc)
+    cpu_savings=$(echo "scale=2; 100 - $cpu_pct" | bc)
+  else
+    cpu_pct="NA"
+    cpu_savings="NA"
+  fi
+
+  # --- MEM % ---
+  if [[ "$mem_req_mi" -ne 0 ]]; then
+    mem_pct=$(echo "scale=2; ($mem_usage_mi/$mem_req_mi)*100" | bc)
+    mem_savings=$(echo "scale=2; 100 - $mem_pct" | bc)
+  else
+    mem_pct="NA"
+    mem_savings="NA"
+  fi
+
+  echo -e "$pod\t${cpu_req_m}m\t${cpu_usage:-0}\t${cpu_pct}%\t${cpu_savings}%\t${mem_req_mi}Mi\t${mem_usage:-0}\t${mem_pct}%\t${mem_savings}%"
+
+done
