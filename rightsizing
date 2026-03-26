@@ -1,0 +1,73 @@
+NAMESPACE=your-namespace
+OUTPUT_FILE=namespace_usage.csv
+
+# CSV Header
+echo "POD,CPU_REQ(m),CPU_USE(m),CPU_UTIL(%),CPU_SAVINGS(%),MEM_REQ(Mi),MEM_USE(Mi),MEM_UTIL(%),MEM_SAVINGS(%)" > $OUTPUT_FILE
+
+for pod in $(kubectl get pods -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
+
+  cpu_req_m=0
+  mem_req_mi=0
+
+  container_count=$(kubectl get pod $pod -n $NAMESPACE -o jsonpath='{.spec.containers[*].name}' | wc -w)
+
+  for i in $(seq 0 $((container_count-1))); do
+    cpu=$(kubectl get pod $pod -n $NAMESPACE -o jsonpath="{.spec.containers[$i].resources.requests.cpu}")
+    mem=$(kubectl get pod $pod -n $NAMESPACE -o jsonpath="{.spec.containers[$i].resources.requests.memory}")
+
+    # CPU normalize
+    if [[ "$cpu" == *m ]]; then
+      val=${cpu%m}
+    elif [[ -n "$cpu" ]]; then
+      val=$(echo "$cpu * 1000" | bc)
+    else
+      val=0
+    fi
+    cpu_req_m=$(echo "$cpu_req_m + $val" | bc)
+
+    # Memory normalize
+    if [[ "$mem" == *Mi ]]; then
+      val=${mem%Mi}
+    elif [[ "$mem" == *Gi ]]; then
+      val=$(echo "${mem%Gi} * 1024" | bc)
+    elif [[ "$mem" == *Ki ]]; then
+      val=$(echo "${mem%Ki} / 1024" | bc)
+    else
+      val=0
+    fi
+    mem_req_mi=$(echo "$mem_req_mi + $val" | bc)
+  done
+
+  usage=$(kubectl top pod $pod -n $NAMESPACE --no-headers 2>/dev/null)
+
+  cpu_usage=$(echo $usage | awk '{print $2}')
+  mem_usage=$(echo $usage | awk '{print $3}')
+
+  # Normalize usage
+  cpu_usage_m=${cpu_usage%m}
+  mem_usage_mi=$(echo $mem_usage | sed 's/Mi//' | sed 's/Gi/*1024/' | bc 2>/dev/null)
+
+  # CPU %
+  if [[ "$cpu_req_m" -ne 0 ]]; then
+    cpu_pct=$(echo "scale=2; ($cpu_usage_m/$cpu_req_m)*100" | bc)
+    cpu_savings=$(echo "scale=2; 100 - $cpu_pct" | bc)
+  else
+    cpu_pct=""
+    cpu_savings=""
+  fi
+
+  # MEM %
+  if [[ "$mem_req_mi" -ne 0 ]]; then
+    mem_pct=$(echo "scale=2; ($mem_usage_mi/$mem_req_mi)*100" | bc)
+    mem_savings=$(echo "scale=2; 100 - $mem_pct" | bc)
+  else
+    mem_pct=""
+    mem_savings=""
+  fi
+
+  # Write CSV row
+  echo "$pod,$cpu_req_m,$cpu_usage_m,$cpu_pct,$cpu_savings,$mem_req_mi,$mem_usage_mi,$mem_pct,$mem_savings" >> $OUTPUT_FILE
+
+done
+
+echo "✅ CSV generated: $OUTPUT_FILE"
