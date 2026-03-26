@@ -1,0 +1,166 @@
+package main
+
+import (
+	"context"
+	"encoding/csv"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/kubernetes"
+	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: ./kube-usage <namespace>")
+		os.Exit(1)
+	}
+
+	namespace := os.Args[1]
+	timestamp := time.Now().Format(time.RFC3339)
+	outputFile := fmt.Sprintf("%s.csv", namespace)
+
+	kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
+
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		panic(err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err)
+	}
+
+	metricsClient, err := metricsv.NewForConfig(config)
+	if err != nil {
+		fmt.Println("⚠️ Metrics client error:", err)
+	}
+
+	ctx := context.Background()
+
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		panic(err)
+	}
+
+	metricsMap := make(map[string]map[string]int64)
+
+	metrics, err := metricsClient.MetricsV1beta1().PodMetricses(namespace).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, m := range metrics.Items {
+			var cpuUsage int64
+			var memUsage int64
+
+			for _, c := range m.Containers {
+				cpuUsage += c.Usage.Cpu().MilliValue()
+				memUsage += c.Usage.Memory().Value() / (1024 * 1024)
+			}
+
+			metricsMap[m.Name] = map[string]int64{
+				"cpu": cpuUsage,
+				"mem": memUsage,
+			}
+		}
+	}
+
+	file, err := os.Create(outputFile)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	writer.Write([]string{
+		"TIMESTAMP", "NAMESPACE", "POD",
+		"CPU_REQ(m)", "CPU_USE(m)", "CPU_UTIL(%)", "CPU_SAVINGS(%)",
+		"MEM_REQ(Mi)", "MEM_USE(Mi)", "MEM_UTIL(%)", "MEM_SAVINGS(%)",
+		"STATUS",
+	})
+
+	for _, pod := range pods.Items {
+
+		// Skip completed/failed pods
+		if pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
+			continue
+		}
+
+		var cpuReq int64
+		var memReq int64
+
+		// --- Sum container requests ---
+		for _, c := range pod.Spec.Containers {
+			if c.Resources.Requests != nil {
+
+				if cpu, ok := c.Resources.Requests["cpu"]; ok {
+					cpuReq += cpu.MilliValue()
+				}
+
+				if mem, ok := c.Resources.Requests["memory"]; ok {
+					memReq += mem.Value() / (1024 * 1024)
+				}
+			}
+		}
+
+		// --- Usage ---
+		cpuUse := int64(0)
+		memUse := int64(0)
+
+		if m, ok := metricsMap[pod.Name]; ok {
+			cpuUse = m["cpu"]
+			memUse = m["mem"]
+		}
+
+		// --- Percent ---
+		cpuUtil := safePercent(cpuUse, cpuReq)
+		memUtil := safePercent(memUse, memReq)
+
+		cpuSavings := safeSavings(cpuUtil, cpuReq)
+		memSavings := safeSavings(memUtil, memReq)
+
+		writer.Write([]string{
+			timestamp,
+			namespace,
+			pod.Name,
+			intToStr(cpuReq),
+			intToStr(cpuUse),
+			floatToStr(cpuUtil),
+			floatToStr(cpuSavings),
+			intToStr(memReq),
+			intToStr(memUse),
+			floatToStr(memUtil),
+			floatToStr(memSavings),
+			string(pod.Status.Phase),
+		})
+	}
+
+	fmt.Println("✅ CSV generated:", outputFile)
+}
+
+func safePercent(used, req int64) float64 {
+	if req == 0 {
+		return 0
+	}
+	return (float64(used) / float64(req)) * 100
+}
+
+func safeSavings(util float64, req int64) float64 {
+	if req == 0 {
+		return 0
+	}
+	return 100 - util
+}
+
+func intToStr(v int64) string {
+	return fmt.Sprintf("%d", v)
+}
+
+func floatToStr(v float64) string {
+	return fmt.Sprintf("%.2f", v)
+}
